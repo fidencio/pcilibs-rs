@@ -7,6 +7,8 @@ mod iommufd;
 mod pci_ids;
 mod pci_manager;
 mod sysfs;
+#[cfg(any(test, feature = "testfs"))]
+pub mod testfs;
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -14,8 +16,6 @@ use std::os::unix::prelude::FileTypeExt;
 
 use nix::sys::stat;
 
-#[cfg(feature = "testfs")]
-pub use iommufd::testfs;
 pub use iommufd::{
     enumerate_iommufd, is_passthrough_capable_class, lookup_iommufd_dev, IommufdDev,
     IOMMUFD_SYSFS_CLASS, IOMMUFD_VFIO_DIR,

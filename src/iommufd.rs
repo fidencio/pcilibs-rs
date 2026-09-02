@@ -150,41 +150,10 @@ pub fn enumerate_iommufd(vfio_dir: &Path, sysfs_dir: &Path) -> Vec<IommufdDev> {
     devs
 }
 
-/// Fake IOMMUFD node layout for tests, mirroring what `enumerate_iommufd`
-/// reads, under one root:
-///   `<root>/devices/vfio<n>`                       — the cdev entry
-///   `<root>/sysfs/vfio<n>/device/{vendor,device,class}`   — fake sysfs
-///
-/// Enable with the `testfs` feature (dev-dependencies only — this writes
-/// fake sysfs trees and belongs nowhere near production code).
-#[cfg(any(test, feature = "testfs"))]
-pub mod testfs {
-    use std::path::{Path, PathBuf};
-
-    /// The sysfs root to pass alongside `root` to `enumerate_iommufd`.
-    pub fn sysfs(root: &Path) -> PathBuf {
-        root.join("sysfs")
-    }
-
-    /// Add one fake cdev `vfio<n>` with the given sysfs `vendor`, `device`,
-    /// and `class` contents (as sysfs prints them, e.g. "0x10de", "0x2330",
-    /// "0x030200").
-    pub fn add(root: &Path, n: u32, vendor: &str, device: &str, class: &str) {
-        let devices = root.join("devices");
-        std::fs::create_dir_all(&devices).unwrap();
-        std::fs::write(devices.join(format!("vfio{n}")), b"").unwrap();
-        let dev_dir = sysfs(root).join(format!("vfio{n}")).join("device");
-        std::fs::create_dir_all(&dev_dir).unwrap();
-        std::fs::write(dev_dir.join("vendor"), format!("{vendor}\n")).unwrap();
-        std::fs::write(dev_dir.join("device"), format!("{device}\n")).unwrap();
-        std::fs::write(dev_dir.join("class"), format!("{class}\n")).unwrap();
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::testfs::add;
     use super::*;
+    use crate::testfs::add;
     use std::fs;
     use tempfile::TempDir;
 
