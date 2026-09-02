@@ -5,11 +5,19 @@
 //! Sysfs paths, off an injectable mount point so tests can point them at a
 //! temp tree rather than the running kernel.
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 
 use crate::normalize_bdf;
 
 pub const SYSFS: &str = "/sys";
+
+/// One ordinary component, so joining it cannot leave the root.
+fn is_component(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(Component::Normal(one)) if one == OsStr::new(name))
+        && components.next().is_none()
+}
 
 #[derive(Clone, Debug)]
 pub struct Sysfs {
@@ -29,14 +37,45 @@ impl Sysfs {
         }
     }
 
+    pub fn bus_pci(&self) -> PathBuf {
+        self.root.join("bus/pci")
+    }
+
     pub fn devices(&self) -> PathBuf {
-        self.root.join("bus/pci/devices")
+        self.bus_pci().join("devices")
     }
 
     /// `None` unless the address is one, since this is where it becomes a
     /// path.
     pub fn device(&self, address: &str) -> Option<PathBuf> {
         Some(self.devices().join(normalize_bdf(address)?))
+    }
+
+    /// Preferred over a driver's own `bind`, which ignores `driver_override`.
+    pub fn drivers_probe(&self) -> PathBuf {
+        self.bus_pci().join("drivers_probe")
+    }
+
+    /// Absent unless the driver is registered, i.e. its module is loaded.
+    ///
+    /// `None` unless the name is one, since this is where it becomes a path.
+    pub fn driver(&self, name: &str) -> Option<PathBuf> {
+        is_component(name).then(|| self.bus_pci().join("drivers").join(name))
+    }
+
+    /// Where a loaded module lists the drivers it registers.  Takes either
+    /// spelling: modprobe answers to `vfio-pci`, sysfs only to `vfio_pci`.
+    ///
+    /// `None` unless the name is one, since this is where it becomes a path.
+    pub fn module(&self, name: &str) -> Option<PathBuf> {
+        let name = name.replace('-', "_");
+        is_component(&name).then(|| self.root.join("module").join(name))
+    }
+
+    /// Empty when the IOMMU is off.  Beats the kernel command line, where
+    /// the option is architecture-specific and often implicit.
+    pub fn iommu_groups(&self) -> PathBuf {
+        self.root.join("kernel/iommu_groups")
     }
 
     fn class(&self, name: &str) -> PathBuf {
@@ -95,5 +134,39 @@ mod tests {
     #[case::empty("")]
     fn refuses_an_address_that_is_not_one(#[case] address: &str) {
         assert!(Sysfs::default().device(address).is_none());
+    }
+
+    /// Hyphens kept, unlike a module: this is the name the kernel registered.
+    #[rstest]
+    #[case::vfio_pci("vfio-pci", true)]
+    #[case::traversal("../../../etc", false)]
+    #[case::absolute("/etc", false)]
+    #[case::separator("vfio-pci/..", false)]
+    #[case::empty("", false)]
+    fn takes_a_driver_name_and_not_a_path(#[case] name: &str, #[case] accepted: bool) {
+        let path = Sysfs::new(Path::new("/tmp/fake")).driver(name);
+
+        assert_eq!(path.is_some(), accepted, "{name:?}");
+        if let Some(path) = path {
+            assert_eq!(path, Path::new("/tmp/fake/bus/pci/drivers").join(name));
+        }
+    }
+
+    #[rstest]
+    #[case::underscored("nvgrace_gpu_vfio_pci", true)]
+    #[case::hyphenated("nvgrace-gpu-vfio-pci", true)]
+    #[case::traversal("../../target", false)]
+    #[case::absolute("/etc", false)]
+    #[case::separator("vfio_pci/../..", false)]
+    #[case::parent("..", false)]
+    #[case::current(".", false)]
+    #[case::empty("", false)]
+    fn takes_a_module_name_and_not_a_path(#[case] name: &str, #[case] accepted: bool) {
+        let path = Sysfs::new(Path::new("/tmp/fake")).module(name);
+
+        assert_eq!(path.is_some(), accepted, "{name:?}");
+        if let Some(path) = path {
+            assert_eq!(path.parent(), Some(Path::new("/tmp/fake/module")));
+        }
     }
 }

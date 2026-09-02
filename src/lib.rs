@@ -9,6 +9,7 @@ mod pci_manager;
 mod sysfs;
 #[cfg(any(test, feature = "testfs"))]
 pub mod testfs;
+pub mod vfio;
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -22,6 +23,16 @@ pub use iommufd::{
 };
 pub use pci_manager::{is_pcie_device, PCIDevice, PCIDeviceManager};
 pub use sysfs::{Sysfs, SYSFS};
+
+pub(crate) fn failed(kind: std::io::ErrorKind, message: String) -> std::io::Error {
+    std::io::Error::new(kind, message)
+}
+
+/// Keeps the kind, so a caller can still tell a missing device from a
+/// permission problem, and prepends what was being attempted.
+pub(crate) fn context(err: std::io::Error, what: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(err.kind(), format!("{what}: {err}"))
+}
 
 /// The PCI domain sysfs always spells out, and callers often omit.
 pub const PCI_DEV_DOMAIN: &str = "0000";

@@ -11,13 +11,13 @@ license = "Apache-2.0"
 edition = "2021"
 
 [features]
-# Test fixtures: fake /dev/vfio + sysfs layouts for enumerate_iommufd.
-# For dev-dependencies only.
-testfs = []
+# Fake sysfs and /dev/vfio trees. For dev-dependencies only.
+testfs = ["dep:tempfile"]
 
 [dependencies]
 nix = { version = "0.31.3", default-features = false, features = ["fs"] }
 phf = { version = "0.11", default-features = false }
+tempfile = { version = "3.19.1", optional = true }
 
 [build-dependencies]
 nom = { version = "7.1", default-features = false }

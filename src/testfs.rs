@@ -9,9 +9,120 @@
 //! sysfs trees and belongs nowhere near production code.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use tempfile::TempDir;
 
 use crate::Sysfs;
+
+/// A sysfs tree, kept alive by the handle: dropping it removes the tree.
+pub struct Fake {
+    pub sysfs: Sysfs,
+    root: TempDir,
+}
+
+/// The directories the kernel always has, so a test only has to add what it
+/// is about.
+pub fn fake() -> Fake {
+    let root = tempfile::tempdir().unwrap();
+    let sysfs = Sysfs::new(root.path());
+
+    fs::create_dir_all(sysfs.devices()).unwrap();
+    fs::create_dir_all(sysfs.bus_pci().join("drivers")).unwrap();
+    fs::create_dir_all(sysfs.iommu_groups()).unwrap();
+    fs::write(sysfs.drivers_probe(), "").unwrap();
+
+    Fake { sysfs, root }
+}
+
+impl Fake {
+    pub fn root(&self) -> &Path {
+        self.root.path()
+    }
+
+    pub fn device(&self, address: &str) -> PathBuf {
+        self.sysfs.device(address).expect("a PCI address")
+    }
+
+    pub fn add_device(&self, address: &str, driver: Option<&str>) {
+        let path = self.device(address);
+        fs::create_dir_all(&path).unwrap();
+
+        // The kernel links both ways, and names the device by its canonical
+        // address on both sides.
+        if let Some(driver) = driver {
+            let name = path.file_name().expect("a device directory");
+            let driver_dir = self.add_driver(driver);
+            std::os::unix::fs::symlink(&driver_dir, path.join("driver")).unwrap();
+            std::os::unix::fs::symlink(&path, driver_dir.join(name)).unwrap();
+        }
+    }
+
+    pub fn add_pci_device(
+        &self,
+        address: &str,
+        vendor: u16,
+        device: u16,
+        class: u32,
+        driver: Option<&str>,
+    ) {
+        self.add_device(address, driver);
+
+        let path = self.device(address);
+        fs::write(path.join("vendor"), format!("{vendor:#06x}\n")).unwrap();
+        fs::write(path.join("device"), format!("{device:#06x}\n")).unwrap();
+        fs::write(path.join("class"), format!("{class:#08x}\n")).unwrap();
+        fs::write(path.join("numa_node"), "0\n").unwrap();
+    }
+
+    pub fn add_driver(&self, name: &str) -> PathBuf {
+        let path = self.driver(name);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    pub fn driver(&self, name: &str) -> PathBuf {
+        self.sysfs.driver(name).expect("a driver name")
+    }
+
+    /// A loaded module, as `/sys/module/<module>/drivers/pci:<driver>`.
+    pub fn add_module(&self, module: &str, driver: &str) {
+        let path = self
+            .sysfs
+            .module(module)
+            .expect("a module name")
+            .join("drivers")
+            .join(format!("pci:{driver}"));
+        fs::create_dir_all(path).unwrap();
+    }
+
+    pub fn add_iommu_group(&self, group: u32) -> PathBuf {
+        let path = self.sysfs.iommu_groups().join(group.to_string());
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    pub fn set_iommu_group(&self, address: &str, group: u32) {
+        let path = self.add_iommu_group(group);
+        std::os::unix::fs::symlink(path, self.device(address).join("iommu_group")).unwrap();
+    }
+
+    pub fn driver_override(&self, address: &str) -> String {
+        read(self.device(address).join("driver_override"))
+    }
+
+    pub fn drivers_probe(&self) -> String {
+        read(self.sysfs.drivers_probe())
+    }
+
+    pub fn driver_unbind(&self, driver: &str) -> String {
+        read(self.driver(driver).join("unbind"))
+    }
+}
+
+fn read(path: PathBuf) -> String {
+    fs::read_to_string(path).unwrap_or_default()
+}
 
 /// Add one fake cdev `vfio<n>` with the given sysfs `vendor`, `device`, and
 /// `class` contents (as sysfs prints them, e.g. "0x10de", "0x2330",
@@ -31,4 +142,20 @@ pub fn add(root: &Path, n: u32, vendor: &str, device: &str, class: &str) {
     fs::write(dev_dir.join("vendor"), format!("{vendor}\n")).unwrap();
     fs::write(dev_dir.join("device"), format!("{device}\n")).unwrap();
     fs::write(dev_dir.join("class"), format!("{class}\n")).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sysfs spells the device the same on both sides of the link.
+    #[test]
+    fn links_a_device_by_its_canonical_address() {
+        let fake = fake();
+        fake.add_device("65:00.0", Some("vfio-pci"));
+
+        let driver = fake.driver("vfio-pci");
+        assert!(driver.join("0000:65:00.0").is_symlink());
+        assert!(!driver.join("65:00.0").exists());
+    }
 }
