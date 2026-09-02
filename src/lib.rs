@@ -6,6 +6,7 @@
 mod iommufd;
 mod pci_ids;
 mod pci_manager;
+mod sysfs;
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -20,6 +21,7 @@ pub use iommufd::{
     IOMMUFD_SYSFS_CLASS, IOMMUFD_VFIO_DIR,
 };
 pub use pci_manager::{is_pcie_device, PCIDevice, PCIDeviceManager};
+pub use sysfs::{Sysfs, SYSFS};
 
 /// The PCI domain sysfs always spells out, and callers often omit.
 pub const PCI_DEV_DOMAIN: &str = "0000";
