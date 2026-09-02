@@ -18,7 +18,7 @@ use nix::sys::stat;
 
 pub use iommufd::{
     enumerate_iommufd, is_passthrough_capable_class, lookup_iommufd_dev, IommufdDev,
-    IOMMUFD_SYSFS_CLASS, IOMMUFD_VFIO_DIR,
+    IOMMUFD_VFIO_DIR,
 };
 pub use pci_manager::{is_pcie_device, PCIDevice, PCIDeviceManager};
 pub use sysfs::{Sysfs, SYSFS};

@@ -9,21 +9,24 @@
 //! sysfs trees and belongs nowhere near production code.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// The sysfs root to pass alongside `root` to `enumerate_iommufd`.
-pub fn sysfs(root: &Path) -> PathBuf {
-    root.join("sysfs")
-}
+use crate::Sysfs;
 
 /// Add one fake cdev `vfio<n>` with the given sysfs `vendor`, `device`, and
 /// `class` contents (as sysfs prints them, e.g. "0x10de", "0x2330",
 /// "0x030200").
+///
+/// `root` is both the `/dev/vfio` and the sysfs root: the cdev lands at
+/// `<root>/devices/vfio<n>` and its identity under `<root>/class/vfio-dev/`,
+/// so a caller passes `root` and `Sysfs::new(root)` to the same tree.
 pub fn add(root: &Path, n: u32, vendor: &str, device: &str, class: &str) {
     let devices = root.join("devices");
     fs::create_dir_all(&devices).unwrap();
     fs::write(devices.join(format!("vfio{n}")), b"").unwrap();
-    let dev_dir = sysfs(root).join(format!("vfio{n}")).join("device");
+    let dev_dir = Sysfs::new(root)
+        .vfio_dev(&format!("vfio{n}"))
+        .join("device");
     fs::create_dir_all(&dev_dir).unwrap();
     fs::write(dev_dir.join("vendor"), format!("{vendor}\n")).unwrap();
     fs::write(dev_dir.join("device"), format!("{device}\n")).unwrap();

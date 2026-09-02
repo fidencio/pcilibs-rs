@@ -38,6 +38,16 @@ impl Sysfs {
     pub fn device(&self, address: &str) -> Option<PathBuf> {
         Some(self.devices().join(normalize_bdf(address)?))
     }
+
+    fn class(&self, name: &str) -> PathBuf {
+        self.root.join("class").join(name)
+    }
+
+    /// `<name>/device` links to the PCI function behind a vfio character
+    /// device.
+    pub fn vfio_dev(&self, name: &str) -> PathBuf {
+        self.class("vfio-dev").join(name)
+    }
 }
 
 #[cfg(test)]

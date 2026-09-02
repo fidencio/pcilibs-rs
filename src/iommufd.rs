@@ -4,13 +4,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// Root of the IOMMUFD character device tree; cdevs live at
-/// `<IOMMUFD_VFIO_DIR>/devices/vfioN`.  A kernel contract, not configuration.
-pub const IOMMUFD_VFIO_DIR: &str = "/dev/vfio";
+use crate::Sysfs;
 
-/// Sysfs class for VFIO character devices; `<IOMMUFD_SYSFS_CLASS>/vfioN/device`
-/// links to the PCI function that backs each cdev.  A kernel contract.
-pub const IOMMUFD_SYSFS_CLASS: &str = "/sys/class/vfio-dev";
+/// Root of the IOMMUFD character device tree; cdevs live at
+/// `<IOMMUFD_VFIO_DIR>/devices/vfioN`.  Devfs rather than sysfs, so it stays a
+/// path of its own.  A kernel contract, not configuration.
+pub const IOMMUFD_VFIO_DIR: &str = "/dev/vfio";
 
 /// One IOMMUFD character device: the file at `<vfio_dir>/devices/vfioN`,
 /// together with the PCI identity read from sysfs.
@@ -85,19 +84,19 @@ pub fn is_passthrough_capable_class(class: u32) -> bool {
 
 /// Look up a single IOMMUFD character device by its kernel name (e.g. `"vfio5"`).
 ///
-/// Reads PCI identity from `sysfs_dir/<name>/device/{vendor,device,class}`.
+/// Reads PCI identity from `<sysfs>/class/vfio-dev/<name>/device/`.
 /// Returns `None` if the sysfs entry is absent or any field cannot be parsed.
 ///
 /// This is the single-device counterpart to [`enumerate_iommufd`]: use it
 /// when the caller already knows which cdev it wants (e.g. from a CDI spec)
 /// and does not need to scan the full `/dev/vfio/devices/` directory.
-pub fn lookup_iommufd_dev(name: &str, vfio_dir: &Path, sysfs_dir: &Path) -> Option<IommufdDev> {
+pub fn lookup_iommufd_dev(name: &str, vfio_dir: &Path, sysfs: &Sysfs) -> Option<IommufdDev> {
     let num = name.strip_prefix("vfio")?.parse::<u32>().ok()?;
     let path = vfio_dir.join("devices").join(name);
     if !path.exists() {
         return None;
     }
-    let device = sysfs_dir.join(name).join("device");
+    let device = sysfs.vfio_dev(name).join("device");
     let read = |f: &str| std::fs::read_to_string(device.join(f)).unwrap_or_default();
     let vendor = u16::from_str_radix(read("vendor").trim().trim_start_matches("0x"), 16).ok()?;
     let dev_id = u16::from_str_radix(read("device").trim().trim_start_matches("0x"), 16).ok()?;
@@ -112,10 +111,10 @@ pub fn lookup_iommufd_dev(name: &str, vfio_dir: &Path, sysfs_dir: &Path) -> Opti
 }
 
 /// Enumerate all IOMMUFD character devices under `<vfio_dir>/devices/` and
-/// resolve their PCI identity from `sysfs_dir`.  Entries whose sysfs files
-/// are absent or unparseable are silently skipped.  Result is sorted by
-/// device number.
-pub fn enumerate_iommufd(vfio_dir: &Path, sysfs_dir: &Path) -> Vec<IommufdDev> {
+/// resolve their PCI identity from sysfs.  Entries whose sysfs files are
+/// absent or unparseable are silently skipped.  Result is sorted by device
+/// number.
+pub fn enumerate_iommufd(vfio_dir: &Path, sysfs: &Sysfs) -> Vec<IommufdDev> {
     let devices_dir = vfio_dir.join("devices");
     let Ok(rd) = std::fs::read_dir(&devices_dir) else {
         return vec![];
@@ -129,7 +128,7 @@ pub fn enumerate_iommufd(vfio_dir: &Path, sysfs_dir: &Path) -> Vec<IommufdDev> {
                 .strip_prefix("vfio")?
                 .parse::<u32>()
                 .ok()?;
-            let device = sysfs_dir.join(format!("vfio{num}")).join("device");
+            let device = sysfs.vfio_dev(&format!("vfio{num}")).join("device");
             let read = |f: &str| std::fs::read_to_string(device.join(f)).unwrap_or_default();
             let vendor =
                 u16::from_str_radix(read("vendor").trim().trim_start_matches("0x"), 16).ok()?;
@@ -164,8 +163,7 @@ mod tests {
         add(root.path(), 7, "0x10de", "0x22a3", "0x068000");
         add(root.path(), 3, "0x15b3", "0x101e", "0x020000");
 
-        let sysfs = root.path().join("sysfs");
-        let devs = enumerate_iommufd(root.path(), &sysfs);
+        let devs = enumerate_iommufd(root.path(), &Sysfs::new(root.path()));
         assert_eq!(
             devs.iter().map(|d| d.num).collect::<Vec<_>>(),
             vec![3, 7, 42]
@@ -183,7 +181,7 @@ mod tests {
         // A device id the database cannot know.
         add(root.path(), 1, "0x10de", "0xdead", "0x030200");
 
-        let devs = enumerate_iommufd(root.path(), &root.path().join("sysfs"));
+        let devs = enumerate_iommufd(root.path(), &Sysfs::new(root.path()));
         let h100 = devs[0].device_name().expect("10de:2330 must be known");
         assert!(h100.contains("GH100"), "unexpected name: {}", h100);
         assert_eq!(devs[1].device_name(), None);
@@ -197,13 +195,13 @@ mod tests {
         fs::write(devices.join("vfio0"), b"").unwrap();
         // no sysfs entry — filter_map returns None
 
-        assert!(enumerate_iommufd(root.path(), &root.path().join("sysfs")).is_empty());
+        assert!(enumerate_iommufd(root.path(), &Sysfs::new(root.path())).is_empty());
     }
 
     #[test]
     fn missing_devices_dir_returns_empty() {
         let root = TempDir::new().unwrap();
-        assert!(enumerate_iommufd(root.path(), &root.path().join("sysfs")).is_empty());
+        assert!(enumerate_iommufd(root.path(), &Sysfs::new(root.path())).is_empty());
     }
 
     #[test]
@@ -227,10 +225,10 @@ mod tests {
     #[test]
     fn lookup_returns_dev_for_known_name() {
         let root = TempDir::new().unwrap();
-        let sysfs = root.path().join("sysfs");
         add(root.path(), 5, "0x10de", "0x22a3", "0x068000");
 
-        let dev = lookup_iommufd_dev("vfio5", root.path(), &sysfs).expect("should find vfio5");
+        let dev = lookup_iommufd_dev("vfio5", root.path(), &Sysfs::new(root.path()))
+            .expect("should find vfio5");
         assert_eq!(dev.num, 5);
         assert_eq!(dev.vendor, 0x10de);
         assert_eq!(dev.device, 0x22a3);
@@ -241,16 +239,16 @@ mod tests {
     #[test]
     fn lookup_returns_none_for_missing_sysfs() {
         let root = TempDir::new().unwrap();
-        let sysfs = root.path().join("sysfs");
-        assert!(lookup_iommufd_dev("vfio99", root.path(), &sysfs).is_none());
+
+        assert!(lookup_iommufd_dev("vfio99", root.path(), &Sysfs::new(root.path())).is_none());
     }
 
     #[test]
     fn lookup_returns_none_when_cdev_absent_but_sysfs_present() {
         let root = TempDir::new().unwrap();
-        let sysfs = root.path().join("sysfs");
+        let sysfs = Sysfs::new(root.path());
         // Write sysfs files without creating the cdev entry under devices/.
-        let dev_dir = sysfs.join("vfio5").join("device");
+        let dev_dir = sysfs.vfio_dev("vfio5").join("device");
         fs::create_dir_all(&dev_dir).unwrap();
         fs::write(dev_dir.join("vendor"), "0x10de\n").unwrap();
         fs::write(dev_dir.join("device"), "0x22a3\n").unwrap();
@@ -262,7 +260,7 @@ mod tests {
     #[test]
     fn lookup_returns_none_for_bad_name() {
         let root = TempDir::new().unwrap();
-        let sysfs = root.path().join("sysfs");
-        assert!(lookup_iommufd_dev("notavfio", root.path(), &sysfs).is_none());
+
+        assert!(lookup_iommufd_dev("notavfio", root.path(), &Sysfs::new(root.path())).is_none());
     }
 }
