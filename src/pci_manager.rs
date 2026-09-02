@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use crate::pci_ids::{Classes, Vendors};
 
-const PCI_DEV_DOMAIN: &str = "0000";
+use crate::normalize_bdf;
+
 const PCI_CONFIG_SPACE_SZ: u64 = 256;
 
 const UNKNOWN_DEVICE: &str = "UNKNOWN_DEVICE";
@@ -74,11 +75,18 @@ impl PCIDeviceManager {
         vendor: Option<u16>,
         cache: &mut HashMap<String, PCIDevice>,
     ) -> io::Result<Option<PCIDevice>> {
-        if let Some(device) = cache.get(address) {
+        let address = normalize_bdf(address).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{address:?} is not a PCI address"),
+            )
+        })?;
+
+        if let Some(device) = cache.get(&address) {
             return Ok(Some(device.clone()));
         }
 
-        let device_path = self.pci_devices_root.join(address);
+        let device_path = self.pci_devices_root.join(&address);
 
         // read vendor ID
         let vendor_str = fs::read_to_string(device_path.join("vendor"))?;
@@ -137,7 +145,7 @@ impl PCIDeviceManager {
 
         let pci_device = PCIDevice {
             device_path,
-            address: address.to_string(),
+            address: address.clone(),
             vendor: vendor_id,
             class: class_id,
             device: device_id,
@@ -148,24 +156,19 @@ impl PCIDeviceManager {
             class_name,
         };
 
-        cache.insert(address.to_string(), pci_device.clone());
+        cache.insert(address, pci_device.clone());
 
         Ok(Some(pci_device))
     }
 }
 
-/// Checks if the given BDF corresponds to a PCIe device.
+/// A PCIe function's config space is larger than a conventional PCI one.
 /// The sysbus_pci_root is the path "/sys/bus/pci/devices"
 pub fn is_pcie_device(bdf: &str, sysbus_pci_root: &str) -> bool {
-    let bdf_with_domain = if bdf.split(':').count() == 2 {
-        format!("{PCI_DEV_DOMAIN}:{bdf}")
-    } else {
-        bdf.to_string()
+    let Some(bdf) = normalize_bdf(bdf) else {
+        return false;
     };
-
-    let config_path = PathBuf::from(sysbus_pci_root)
-        .join(bdf_with_domain)
-        .join("config");
+    let config_path = PathBuf::from(sysbus_pci_root).join(bdf).join("config");
 
     match fs::metadata(config_path) {
         Ok(metadata) => metadata.len() > PCI_CONFIG_SPACE_SZ,
@@ -179,6 +182,8 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+
+    use rstest::rstest;
 
     // domain number
     const TEST_PCI_DEV_DOMAIN: &str = "0000";
@@ -215,6 +220,39 @@ mod tests {
         assert_eq!(device.vendor, 0x8086);
         assert_eq!(device.device, 0x1234);
         assert_eq!(device.class, 0x060100);
+    }
+
+    /// A lookup joins its argument onto the sysfs root, so anything that is
+    /// not a PCI address has to be refused rather than followed.
+    #[rstest]
+    #[case("../../../etc/shadow")]
+    #[case("0000:ff:1f.0/../../..")]
+    #[case("/etc/shadow")]
+    #[case("nonsense")]
+    fn a_lookup_refuses_an_address_that_is_not_one(#[case] address: &str) {
+        let tmpdir = setup_mock_device_files();
+        let manager = PCIDeviceManager::new(&tmpdir.path().to_string_lossy());
+
+        let err = manager
+            .get_device_by_pci_bus_id(address, None, &mut HashMap::new())
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// Enumeration and direct lookup have to agree on one spelling, or the
+    /// cache keys and the addresses handed back drift apart.
+    #[test]
+    fn a_lookup_canonicalises_the_address_it_reports() {
+        let tmpdir = setup_mock_device_files();
+        let manager = PCIDeviceManager::new(&tmpdir.path().to_string_lossy());
+
+        let device = manager
+            .get_device_by_pci_bus_id("FF:1F.0", None, &mut HashMap::new())
+            .unwrap()
+            .expect("the mock device should be found");
+
+        assert_eq!(device.address, "0000:ff:1f.0");
     }
 
     #[test]
