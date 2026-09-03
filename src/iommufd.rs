@@ -41,7 +41,7 @@ impl IommufdDev {
     /// crate), e.g. "GH100 [H100 SXM5 80GB]" for 10de:2330.  None if the
     /// database does not know the (vendor, device) pair.
     pub fn device_name(&self) -> Option<&'static str> {
-        pci_ids::Device::from_vid_pid(self.vendor, self.device).map(|d| d.name())
+        crate::pci_ids::Device::from_vid_pid(self.vendor, self.device).map(|d| d.name())
     }
 }
 
@@ -250,6 +250,7 @@ mod tests {
         assert!(!is_passthrough_capable_class(0x060000)); // Host Bridge
         assert!(!is_passthrough_capable_class(0x060400)); // PCI-to-PCI Bridge
         assert!(!is_passthrough_capable_class(0x040300)); // Audio device
+
         // prog-if byte in class should not affect the result
         assert!(!is_passthrough_capable_class(0x060001)); // Host Bridge, non-zero prog-if
     }
