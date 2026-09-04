@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use crate::pci_ids::{Classes, Vendors};
 
-const PCI_DEV_DOMAIN: &str = "0000";
+use crate::{normalize_bdf, Sysfs};
+
 const PCI_CONFIG_SPACE_SZ: u64 = 256;
 
 const UNKNOWN_DEVICE: &str = "UNKNOWN_DEVICE";
@@ -36,20 +37,19 @@ pub struct PCIDevice {
     pub numa_node: i64,
 }
 
+#[derive(Clone, Debug, Default)]
 pub struct PCIDeviceManager {
-    pci_devices_root: PathBuf,
+    sysfs: Sysfs,
 }
 
 impl PCIDeviceManager {
-    pub fn new(pci_devices_root: &str) -> Self {
-        PCIDeviceManager {
-            pci_devices_root: PathBuf::from(pci_devices_root),
-        }
+    pub fn new(sysfs: Sysfs) -> Self {
+        PCIDeviceManager { sysfs }
     }
 
     pub fn get_all_devices(&self, vendor: Option<u16>) -> io::Result<Vec<PCIDevice>> {
         let mut pci_devices = Vec::new();
-        let device_dirs = fs::read_dir(&self.pci_devices_root)?;
+        let device_dirs = fs::read_dir(self.sysfs.devices())?;
 
         let mut cache: HashMap<String, PCIDevice> = HashMap::new();
 
@@ -74,11 +74,18 @@ impl PCIDeviceManager {
         vendor: Option<u16>,
         cache: &mut HashMap<String, PCIDevice>,
     ) -> io::Result<Option<PCIDevice>> {
-        if let Some(device) = cache.get(address) {
+        let address = normalize_bdf(address).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{address:?} is not a PCI address"),
+            )
+        })?;
+
+        if let Some(device) = cache.get(&address) {
             return Ok(Some(device.clone()));
         }
 
-        let device_path = self.pci_devices_root.join(address);
+        let device_path = self.sysfs.devices().join(&address);
 
         // read vendor ID
         let vendor_str = fs::read_to_string(device_path.join("vendor"))?;
@@ -137,7 +144,7 @@ impl PCIDeviceManager {
 
         let pci_device = PCIDevice {
             device_path,
-            address: address.to_string(),
+            address: address.clone(),
             vendor: vendor_id,
             class: class_id,
             device: device_id,
@@ -148,26 +155,19 @@ impl PCIDeviceManager {
             class_name,
         };
 
-        cache.insert(address.to_string(), pci_device.clone());
+        cache.insert(address, pci_device.clone());
 
         Ok(Some(pci_device))
     }
 }
 
-/// Checks if the given BDF corresponds to a PCIe device.
-/// The sysbus_pci_root is the path "/sys/bus/pci/devices"
-pub fn is_pcie_device(bdf: &str, sysbus_pci_root: &str) -> bool {
-    let bdf_with_domain = if bdf.split(':').count() == 2 {
-        format!("{PCI_DEV_DOMAIN}:{bdf}")
-    } else {
-        bdf.to_string()
+/// A PCIe function's config space is larger than a conventional PCI one.
+pub fn is_pcie_device(bdf: &str, sysfs: &Sysfs) -> bool {
+    let Some(device) = sysfs.device(bdf) else {
+        return false;
     };
 
-    let config_path = PathBuf::from(sysbus_pci_root)
-        .join(bdf_with_domain)
-        .join("config");
-
-    match fs::metadata(config_path) {
+    match fs::metadata(device.join("config")) {
         Ok(metadata) => metadata.len() > PCI_CONFIG_SPACE_SZ,
         // Error reading the file, assume it's not a PCIe device
         Err(_) => false,
@@ -180,6 +180,8 @@ mod tests {
     use std::fs;
     use std::io::Write;
 
+    use rstest::rstest;
+
     // domain number
     const TEST_PCI_DEV_DOMAIN: &str = "0000";
 
@@ -187,7 +189,7 @@ mod tests {
     fn setup_mock_device_files() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir should not fail");
         // Create mock path and files for PCI devices
-        let device_path = dir.path().join("0000:ff:1f.0");
+        let device_path = Sysfs::new(dir.path()).device("0000:ff:1f.0").unwrap();
         fs::create_dir_all(&device_path).unwrap();
         fs::write(device_path.join("vendor"), "0x8086").unwrap();
         fs::write(device_path.join("device"), "0x1234").unwrap();
@@ -202,7 +204,7 @@ mod tests {
         let tmpdir = setup_mock_device_files();
 
         // Initialize PCI device manager with the mock path
-        let manager = PCIDeviceManager::new(&tmpdir.path().to_string_lossy());
+        let manager = PCIDeviceManager::new(Sysfs::new(tmpdir.path()));
 
         // Get all devices
         let devices_result = manager.get_all_devices(None);
@@ -217,12 +219,48 @@ mod tests {
         assert_eq!(device.class, 0x060100);
     }
 
+    /// A lookup joins its argument onto the sysfs root, so anything that is
+    /// not a PCI address has to be refused rather than followed.
+    #[rstest]
+    #[case("../../../etc/shadow")]
+    #[case("0000:ff:1f.0/../../..")]
+    #[case("/etc/shadow")]
+    #[case("nonsense")]
+    fn a_lookup_refuses_an_address_that_is_not_one(#[case] address: &str) {
+        let tmpdir = setup_mock_device_files();
+        let manager = PCIDeviceManager::new(Sysfs::new(tmpdir.path()));
+
+        let err = manager
+            .get_device_by_pci_bus_id(address, None, &mut HashMap::new())
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// Enumeration and direct lookup have to agree on one spelling, or the
+    /// cache keys and the addresses handed back drift apart.
+    #[test]
+    fn a_lookup_canonicalises_the_address_it_reports() {
+        let tmpdir = setup_mock_device_files();
+        let manager = PCIDeviceManager::new(Sysfs::new(tmpdir.path()));
+
+        let device = manager
+            .get_device_by_pci_bus_id("FF:1F.0", None, &mut HashMap::new())
+            .unwrap()
+            .expect("the mock device should be found");
+
+        assert_eq!(device.address, "0000:ff:1f.0");
+    }
+
     #[test]
     fn test_is_pcie_device() {
         // Create a mock PCI device config file
         let bdf = format!("{TEST_PCI_DEV_DOMAIN}:ff:00.0");
         let tmpdir = tempfile::tempdir().expect("tempdir should not fail");
-        let config_path = tmpdir.path().join(&bdf).join("config");
+        let config_path = Sysfs::new(tmpdir.path())
+            .device(&bdf)
+            .unwrap()
+            .join("config");
         let _ = fs::create_dir_all(config_path.parent().unwrap());
 
         // Write a file with a size larger than PCI_CONFIG_SPACE_SZ
@@ -231,6 +269,6 @@ mod tests {
         file.write_all(&vec![0; 512]).unwrap();
 
         // It should be true
-        assert!(is_pcie_device("ff:00.0", &tmpdir.path().to_string_lossy()));
+        assert!(is_pcie_device("ff:00.0", &Sysfs::new(tmpdir.path())));
     }
 }
